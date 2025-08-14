@@ -1,0 +1,416 @@
+---
+title: "Exploring the Spatial Effect of Cement Plants on Life Expectancy in Counties"
+author: "Christopher Miller"
+date: "April 24, 2023"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+  html_document:
+    toc: yes
+    toc_depth: '2'
+    df_print: paged
+header-includes:
+   - \usepackage{caption}
+   - \captionsetup[table]{textfont={it}, labelfont={bf}, singlelinecheck=false, labelsep=newline}
+---
+
+
+```{r Front Matter, include=FALSE}
+#Front Matter
+knitr::opts_chunk$set(echo = FALSE, fig.pos = "H", out.extra = "")
+#Bring in Data
+library(readxl)
+library(dplyr)
+library(kableExtra)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library("rnaturalearth")
+library("rnaturalearthdata")
+library("maps")
+library(spatialreg)
+library(ade4)
+library(rgdal)
+library(geosphere)
+library(knitr)
+library(gridExtra)
+
+rm(list=ls())
+
+world <- ne_countries(scale = "medium", returnclass = "sf")
+citydata <- read_xlsx("city_database.xlsx")
+countydata <- read_xlsx("county_database.xlsx")
+```
+
+# Project Description
+
+In the industrialized United States, there is a lot of concern about the effect of industrial plants on our environment and human likelihood. Cement plants are known to have negative effects on the environment. Many studies have been done that show statistical significance in the relationship between negative environmental effects and cement plant locations, for example (Saffari, 2019), but fewer studies have looked at the effects of cement plant locations on human health, for example (Bertoldi, 2012). These studies mostly focus on disease statistics like possible lung conditions that can come from cement plant pollution. Cement plants produce multiple pollutants that are bad for the environment like CO2, but also produce a residue that results from the combustion of pulverized coal that is called fly ash. Fly ash is the concern of a lot of environmentalists because it is acidic and the total effect of it is not known. This paper will look to model life expectancy to determine if cement plant location affects the life span of humans.
+
+This paper will use a mixture of linear regression models depending on if we see spatial autocorrelation in our models. Overall, we will test three different models, a regular linear regression model (LM), a simultaneous autoregressive model (SAR), and a conditional autoregressive model (CAR). It should be noted that the purpose of these models is descriptive and not predictive in the fact that we are not looking to optimize some model, but are rather trying to interpret an effect whether it be significant or not.
+
+## Research Questions
+
+Does the presence of cement plants in a county in the United States negatively effect the life expectancy, compared to its own state, when accounting for other factors? 
+
+## Variables
+
+## Cement Info
+
+There are 105 cement plants in the United States. The data comes from the, "The Global Cement Report™, 14th Edition.", found on the site (https://www.cemnet.com/global-cement-report/country/united-states), this publication has statistics and locations of all cement plants around the world. The majority of the data is behind a pay wall, but the city locations of all U.S. cement plant locations are included. This data source is updated to 2020. Each row in the data represents a cement plant, there are no other variables that come with this data set other than the location of the cement plant.
+
+## City and County Data
+
+The city data comes from the U.S. Geological Survey and U.S. Census Bureau, updated to 2020, found on the site (https://simplemaps.com/data/us-cities). The county data comes from a program of the University of Wisconsin Population Health Institute, found on the site (https://www.countyhealthrankings.org/explore-health-rankings/rankings-data-documentation), that collected data from multiple sources to create the 2023 County Health Rankings. Life expectancy comes from National Center for Health Statistics - Mortality Files, updated to 2020. Overall, this data is put together on the county level, and we will use 5 types of controlling factors to look at for each county; These factors are what we will want to use to isolate the cement plant effect. These five factors are in the data are as a rank of the county relative to their state, but we transform them to be the percent of their rank comparative to the number of the state's counties. This allows for a normalizing multiplicative factor that is compared across states. The factors are listed below:
+
+1. Quality of Life\
+2. Health Behaviors\
+3. Clinical Care\
+4. Social & Environment Factors\
+5. Physical Environment\
+
+
+```{r, include = FALSE}
+#City to county
+citydata$statecounty <- paste(citydata$state_name,citydata$county_name, sep = "")
+citydata <- citydata %>%
+  group_by(statecounty) %>%
+  summarise(amtcmt = sum(cement_amt), lat = mean(lat), lng = mean(lng))
+countydata$statecounty <- paste(countydata$State,countydata$County, sep = "")
+countydata <- merge(countydata,citydata, by = "statecounty", all.x = T)
+countydata <- countydata %>%
+  filter(!is.na(County))%>%
+  filter(!is.na(LifeE))%>%
+  filter(State != "District of Columbia")%>%
+  filter(QualityofLife != "NR")
+countydata$QualityofLife <- as.numeric(countydata$QualityofLife )
+countydata$HealthBehaviors <- as.numeric(countydata$HealthBehaviors)
+countydata$ClinicalCare <- as.numeric(countydata$ClinicalCare)
+countydata$SocialandEconomicFactors <- as.numeric(countydata$SocialandEconomicFactors)
+countydata$PhysicalEnvironment <- as.numeric(countydata$PhysicalEnvironment)
+statedata <- countydata %>%
+  group_by(State) %>%
+  summarise(meanLifeE = mean(LifeE),maxQualityofLife = max(QualityofLife),maxHealthBehaviors = max(HealthBehaviors),maxClinicalCare = max(ClinicalCare),maxSocialandEconomicFactors = max(SocialandEconomicFactors),maxPhysicalEnvironment = max(PhysicalEnvironment))
+
+
+
+countydata <- merge(countydata,statedata %>% dplyr::select(State,maxQualityofLife,maxHealthBehaviors,maxClinicalCare,maxSocialandEconomicFactors,maxPhysicalEnvironment,meanLifeE), by ="State", all.x = T)
+countydata$QualityofLife <- countydata$QualityofLife/ countydata$maxQualityofLife 
+countydata$HealthBehaviors <- countydata$HealthBehaviors/ countydata$maxHealthBehaviors 
+countydata$ClinicalCare <- countydata$ClinicalCare/ countydata$maxClinicalCare
+countydata$SocialandEconomicFactors <- countydata$SocialandEconomicFactors/ countydata$maxSocialandEconomicFactors
+countydata$PhysicalEnvironment <- countydata$PhysicalEnvironment / countydata$maxPhysicalEnvironment
+countydata$LifeE <- countydata$LifeE - countydata$meanLifeE
+countydata$amtcmt <- ifelse(is.na(countydata$amtcmt),0,countydata$amtcmt)
+countydata$amtcmt <- ifelse(countydata$amtcmt > 0 ,"Yes","No")
+
+countydata %>%
+  filter(is.na(lat))
+```
+
+
+For the response we have life expectancy, and we transform this to be a difference between the mean of the state's life expectancy. Life expectancy is also on the county level. Overall, there are 3064 counties that we have data for.
+
+The variable for cement plants is an indicator to see if there is a cement plant in the county or not. Some counties have more than one cement plant, but that dynamic is reflected in the models. Note that there are 105 cement plants in the U.S., we lose 3 by filtering because of not enough information for life expectancy and 50 other counties due to latitude and longitude data, this is explained more in the missingness section. Overall, 89 counties in the United States have one or more cement plant.
+
+# Exploratory Data Analysis (EDA)
+
+## Correlation
+One possible problem is that we do not know how it is decided how a person is counted for their county. We do not know how long the person had to live there to be counted in the "Loss of Life" statistic. There is also an issue of spatial autocorrelation, when assigning numbers to spatial data an inherit issue with correlation between neighbors of counties. This will be discussed more in the statistical methods section.
+
+## Missingness
+Some counties did not have enough data to be ranked for the factors, and it is decided to filter them out. Any county that didn't have a calculated Life Expectancy is filtered. These filters were necessary because there is a need to have observed factors for life expectancy. After all, it is the response, and there is also a need for observed rankings for the county to normalize the counties to the state mean. By doing these filters we lose three cement plant locations. We also lose 50 counties to a lack of coordinate data, but no one of these counties has cement plant locations. This happens because of two reasons, either the county has no municipalities so there was an issue on the coordinate joins, or the county was created from the county ranking data sources that were a subset of another county. This happens mainly in Virginia, and with further time these counties can be fixed and the location data can be inputted manually, but for now, we are assuming those counties will not have a material effect on the model data.
+
+
+```{r, warning = FALSE}
+countydata.sum <- countydata %>%
+  select(LifeE,QualityofLife,HealthBehaviors,ClinicalCare,SocialandEconomicFactors,PhysicalEnvironment)%>%
+  summarise_each(funs(min = min, 
+                      q25 = quantile(., 0.25), 
+                      median = median, 
+                      q75 = quantile(., 0.75), 
+                      max = max,
+                      mean = mean, 
+                      sd = sd,
+                      missing = is.na))
+countydata.sum <- unique(countydata.sum)
+# reshape it using tidyr functions
+
+countydata.stats.tidy <- countydata.sum %>% gather(stat, val) %>%
+  separate(stat, into = c("var", "stat"), sep = "_") %>%
+  spread(stat, val) %>%
+  select(var, min, q25, median, q75, max, mean, sd,missing)
+
+
+
+```
+
+## Outliers
+There are some outliers of big differences between county life expectancy and the state mean, we not will remove any as they are correctly acquired from a verified source. The largest outlier is in Mono County, CA where the life expectancy is ~ 103 years old, 23 years over the mean in CA.
+
+
+## Multivariate Plot
+
+```{r, message =FALSE, fig.cap = "Life Expectancy Vs. Normalizing Factor"}
+countydata$normfact <- (countydata$QualityofLife+countydata$HealthBehaviors+countydata$ClinicalCare+countydata$SocialandEconomicFactors)/4
+
+countydata %>%
+  ggplot(aes(x=normfact,y=LifeE, color = amtcmt))+
+  geom_smooth(method="loess", se = F) +
+  labs(y = "Life Expectancy Compared to State Mean", x = "Normalizing Factor", title = "Life Expectancy Vs. Normalizing Factor")+
+  theme_bw()
+
+```
+
+From Figure 1, at most levels of the normalizing factor, there is a lower life expectancy when the county has a cement plant. This gives some early motivation that there could be a difference between counties that have cement plants and counties that don't have cement plants. We can also see that there is a clear negative linear relationship between the normalizing factor and Life Expectancy. This means that at all four-factor rankings of the counties, the "worse" counties have a lower life expectancy. Knowing that this dynamic exists, all four factors will be included in the modeling to get a fair estimate if the cement plants affect life expectancy or not.
+
+## Early Mapping
+```{r, warning = FALSE, fig.cap = "Side by Side NY Maps of Normalizing Factor and Life Expectancy"}
+theme_set(theme_bw())
+nycounties <- countydata %>%
+  filter(State == "New York") %>%
+  select(County,normfact,LifeE,amtcmt,lat,lng)
+coords <- nycounties %>%
+  filter(amtcmt == "Yes")
+longitude1 <- coords$lng[1]
+longitude2 <- coords$lng[2]
+longitude3 <- coords$lng[3]
+latitude1 <- coords$lat[1]
+latitude2 <- coords$lat[2]
+latitude3 <- coords$lat[3]
+
+LifeE <- (-min(nycounties$LifeE))+nycounties$LifeE
+normfact <- nycounties$normfact
+
+counties <- st_as_sf(map("county", plot = FALSE, fill = TRUE))
+counties <- subset(counties, grepl("new york", counties$ID))
+counties$normfact <- normfact
+counties$LifeE <- LifeE
+
+
+
+plot1 <- ggplot(data = world) +
+    geom_sf() +
+    geom_sf(data = counties, aes(fill = LifeE)) +
+    geom_point( aes(x = longitude1, y = latitude1), size = 2, 
+        shape = 10, fill = "darkred")+
+      geom_point(aes(x = longitude2, y = latitude2), size = 2, 
+        shape = 10, fill = "darkred")+
+      geom_point(aes(x = longitude3, y = latitude3), size = 2, 
+        shape = 10, fill = "darkred")+
+    scale_fill_viridis_c(trans = "sqrt", alpha = .4) +
+    coord_sf(xlim = c(-80, -71), ylim = c(40, 46), expand = FALSE)+
+  labs(y = "Latitude", x = "Longitude", title = "Life Expectancy (Normalized)")
+plot2 <- ggplot(data = world) +
+    geom_sf() +
+    geom_sf(data = counties, aes(fill = normfact)) +
+    geom_point( aes(x = longitude1, y = latitude1), size = 2, 
+        shape = 10, fill = "darkred")+
+      geom_point(aes(x = longitude2, y = latitude2), size = 2, 
+        shape = 10, fill = "darkred")+
+      geom_point(aes(x = longitude3, y = latitude3), size = 2, 
+        shape = 10, fill = "darkred")+
+    scale_fill_viridis_c(trans = "sqrt", alpha = .4) +
+    coord_sf(xlim = c(-80, -71), ylim = c(40, 46), expand = FALSE)+
+  labs(y = "Latitude", x = "Longitude", title = "Normalizing Factor")
+grid.arrange(plot1, plot2, ncol=2)
+
+```
+
+In Figure 2, we can see here that we can graph the cement counties on top of the life expectancy and normalizing factors. From New York, we can see it is tough to draw a relationship between the counties with the cement plants and life expectancies. But we can see the normalizing factor is mixed in those counties, therefore, these factors will be important to control for in the model, because a relationship could become evident after controlling for those factors. This sort of graphing is a good setup for motivation for spatial analysis.
+
+# Statistical Methods
+
+```{r, message = FALSE}
+countydata$ind <- ifelse(countydata$amtcmt == "Yes",1,0)
+countydata <- countydata %>%
+  group_by(State)%>%
+  mutate(remove = sum(ind))
+countydata <- countydata %>%
+  filter(remove != 0)%>%
+  filter(!is.na(lat))%>%
+  filter(!is.na(lng))%>%
+  select(-ind,-remove)
+
+
+```
+
+To start the statistical analysis we will first have remove all states that do not have a cement plant, and counties that we didn't have latitude and longitude values for. In this section we will go over the process that will be used to analyze each state. New York will be used as an example to explain the methods, but then the methods will be applied to each state individually.
+
+```{r, message = FALSE}
+
+nycounties <- countydata %>%
+  filter(State == "New York") %>%
+  select(County,State,QualityofLife,HealthBehaviors,ClinicalCare,SocialandEconomicFactors,LifeE,amtcmt,lat,lng)
+
+nylm <- lm(LifeE ~ amtcmt+QualityofLife+HealthBehaviors+ClinicalCare+SocialandEconomicFactors,data = nycounties)
+
+lmfit <- nylm$fitted.values
+lmfit <- (-min(lmfit))+lmfit
+nycounties2 <- nycounties
+coordinates(nycounties2) <- ~lat+lng
+nb <- spdep::knn2nb(spdep::knearneigh(nycounties2, k = 5), row.names = nycounties2$County)
+NYlistw <- spdep::nb2listw(nb, style = "B")
+testny <- spdep::lm.morantest(nylm, NYlistw)
+
+```
+
+The first method we will explore with the spatial data is ordinary linear regression (LM). This is common to do with spatial data as it allows us to block out certain values to get estimates for our intended explanatory variables in a simple and interpretable way. Each state will have the transformed life expectancy for each county as a dependent variable. For the explanatory variable, there will be an indicator for if a cement plant exists in the county and then the four factors that were decided on in the EDA section. There are four assumptions to LM:
+
+1. Linear Relationship: There needs to be a relationship between the explanatory variables and the dependent variable, and this is assumed by looking at a scatter plot of the variables.
+2. Homoscedasticity: There needs to be a constant variance of the dependent variable at every value of x, and this is assumed from the residuals vs. fitted plot. 
+3. Normality: Residuals need to be normally distributed, and this is assumed from the Q-Q plot.
+4. Independence of Observations: This is not assumed when we are dealing with spatial data just because of the nature of spatial data. Before we use LM results this assumption will need to be checked using a Moran Test.
+
+A Moran Test is a test that looks for spatial autocorrelation between the counties' variables based on the location of the counties. This means it is looking for a correlation between neighbors of each county. There are multiple ways to determine the number of neighbors, and this paper will use the method of k-nearest neighbors. We will set k equal to 5, meaning that each county is defined to have five neighbors in which these neighbors are the closest, defining distance as the latitude and longitude line distance between county centers. There is also a decision to make when defining how much weight each neighbor should have in the Moran Test. This means if you believe that some neighbors should be more influential than others then they would get more weight. For simplicity, we will use a binary weight that gives equal weight to each five nearest neighbors. Once the neighbors and weights are defined, the test is done, and if there is a correlation found then the LM results will be biased and the coefficient estimates will not be close to their true value. 
+
+For our example of New York, the Global Moran's I (test statistic) was 0.1428 and the p-value was significant to a 0.05 level, meaning spatial autocorrelation was found in the counties in this state.
+
+
+
+## Simultaneous Autoregressive Models (SAR)
+
+Now that autocorrelation was found we need to fit a model that takes into account the autocorrelation. The simultaneous autoregressive model makes use of neighbor values in the regression to create fitted values. This means that error terms are dependent on each other, therefore bypassing the assumption of independence of observations.
+
+This model automatically estimates a parameter lambda that adjusts the variance of the dependence variable (life expectancy). This can lead to different predictions from the LM model, but depending on the value of lambda, coefficient estimates might not have much of a difference, though we will have more confidence in the validity of the estimates.
+```{r, message = FALSE}
+nysar <- spautolm(LifeE ~ amtcmt+QualityofLife+HealthBehaviors+ClinicalCare+SocialandEconomicFactors,data = nycounties,listw = NYlistw )
+
+```
+```{r, warning = FALSE, message = FALSE, fig.cap = "Expected Life Expectancy Values from LM Model",fig.height = 5, fig.width = 5}
+nycounties$phat <- nysar$fit$fitted.values
+
+ggplot(nycounties, aes(x = QualityofLife, y=phat,color=amtcmt))+
+  geom_point(aes(y = LifeE)) +
+  geom_smooth(method = lm, se = FALSE) +
+  labs(x = "Quality of Life", y = "Expected Life Expectancy")+
+  theme_bw()
+```
+
+From Figure 3, we can see the expected values of life expectancy against one of the explanatory variables, Quality of Life. We can see from this graph that the SAR model estimates a difference depending if there is a cement plant in a county or not. The model estimates a coefficient of -1.007 for the cement plant variable meaning that if there is a county in NY that has a cement plant, the model predicts a one-year decrease in life expectancy. It should be noted that when we look at each state, only the direction of the cement plant variable will be noted and not the size or significance of the variable. This is because standard errors tend to be high because of the small number of counties that have cement plants, and the focus of the research question is to look at the difference between the counties, and possibly further research could look at the size and significance of the intended effect.
+
+## Conditional Autoregressive Models (CAR)
+
+There is also a second model that deals with autocorrelation, conditional autoregressive models (CAR). The way this model differs from the SAR model is that errors are dependent conditionally on the neighbors, rather than as a whole. A lambda parameter is also estimated for this model, but coefficients tend to not be much different from the SAR model.
+```{r, message = FALSE, warning = FALSE}
+nycar <- spautolm(LifeE ~ amtcmt+QualityofLife+HealthBehaviors+ClinicalCare+SocialandEconomicFactors,data = nycounties, family = "CAR",listw = NYlistw )
+
+```
+
+For the example of New York, we still have the same direction for the cement plant variable as the SAR model, but it is slighlty different at an estimate of -1.159.
+
+# Results
+
+Now that we have the methods defined, we will go through each state and look at the model results. If the Moran's Test is significant then we will use the results from the SAR and CAR models, but if it is insignificant we will use the results from the LM model.
+
+```{r, warning = FALSE}
+statelist <- unique(countydata$State)
+list1 <- {}
+list2 <- {}
+list3 <- {}
+list4 <- {}
+
+for (i in statelist){
+dcounties <- countydata %>%
+  filter(State == i) %>%
+  select(County,State,QualityofLife,HealthBehaviors,ClinicalCare,SocialandEconomicFactors,LifeE,amtcmt,lat,lng)
+
+dlm <- lm(LifeE ~ amtcmt+QualityofLife+HealthBehaviors+ClinicalCare+SocialandEconomicFactors,data = dcounties)
+test2 <- summary(dlm)
+
+dcounties2 <- dcounties
+coordinates(dcounties2) <- ~lat+lng
+nb <- spdep::knn2nb(spdep::knearneigh(dcounties2, k = 5), row.names = dcounties2$County)
+dlistw <- spdep::nb2listw(nb, style = "B")
+test <- spdep::lm.morantest(dlm, dlistw)
+
+dsar <- spautolm(LifeE ~ amtcmt+QualityofLife+HealthBehaviors+ClinicalCare+SocialandEconomicFactors,data = dcounties,listw = dlistw )
+test3 <- summary(dsar)
+
+dcar <- spautolm(LifeE ~ amtcmt+QualityofLife+HealthBehaviors+ClinicalCare+SocialandEconomicFactors,data = dcounties, family = "CAR",listw = dlistw )
+test4 <- summary(dcar)
+
+value1 <- ifelse(test$p.value <.05,"Corr.","Not Corr.")
+list1 <- append(list1,value1)
+value2 <- ifelse(test2$coefficients[2,1] < 0,"Lower","Higher")
+list2 <- append(list2,value2)
+value3 <- ifelse(test3$Coef[2,1] < 0,"Lower","Higher")
+list3 <- append(list3,value3)
+value4 <- ifelse(test4$Coef[2,1] < 0,"Lower","Higher")
+list4 <- append(list4,value4)
+}
+results <- as.data.frame(statelist)
+results$list1 <- list1
+results$list2 <- list2
+results$list3 <- list3
+results$list4 <- list4
+
+kable(results,
+      format = 'latex',
+      booktabs = TRUE,
+      escape = FALSE,
+      col.names = c("State","Moran's I", "LM", "SAR", "CAR"),
+      caption = "Results for Every State") %>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+We can see from Table 1, the directionality of the cement plant variable (amtcmt) in the three models as well if the Moran Test was significant or not. Overall, if we use the SAR and LM model, in 67.6% of states that had cement plants located in them, the counties that had the cement plants had a negative effect on life expectancy when holding other important factors constant. If we use the CAR and LM model it is 61.8%.
+
+
+# Conclusions
+
+When it comes to modelling decisions with spatial data, there are a wide variety of options. By using either the SAR or CAR models paired with the LM model we can see that the estimate for life expectancy based on whether a county has a cement plant is less than in over 50% of states. It can not be said with statistical confidence that this estimate is significant or consistent as more testing or different approaches should be taken to get those results. Overall, we can say there is some preliminary evidence of an negative effect of cement plants on life expectancies in some states.
+
+# Additional Considerations
+
+One thing to consider when this analysis was done is that models were limited to each state independently. There could be some theoretical problems with this, such as dependence assumptions between counties in neighboring states. The spatial correlation models account for the dependence between neighboring counties, but by only modeling each state individually we assume there is no dependence between states. This assumption could be true though because there are big separations between laws and regulations in states, but we are probably losing some data on the possible effect of spatial correlation between cement plant sites and life expectancy by limiting the models to state boundaries.
+
+Another limitation mentioned in the conclusion and throughout the statistical methods is that only directionality can be measured with confidence and we have other problems with the effect estimates concerning size and significance. This is due to a couple of issues, the first being that there are just not enough cement plants in each state to get a confident estimate. Also, by limiting data to state by state, we limit that data even further. A possible solution to this would be to find a way to model all the data as a county and use something like a multi-level model. Another problem with this is that we are using the cement plant variable as a binary indicator where maybe it should be a distance variable, such that it measures the distance of the county to the nearest cement plant, but this would change the scope of the research question.
+
+The last consideration could just be in the models themselves. There are a multitude of ways to model spatial data and even consider neighboring assumptions. As mentioned before we define county neighbors by using a k-nearest method, but there are many other ways to do this.
+
+
+# Bibliography
+
+Saffari, A., Ataei, M., Sereshki, F., & Naderi, M. (2019). Environmental impact assessment (EIA) by using the Fuzzy Delphi Folchi (FDF) method (case study: Shahrood cement plant, Iran). Environment, Development and Sustainability, 21, 817-860.
+
+Bertoldi, M., Borgini, A., Tittarelli, A., Fattore, E., Cau, A., Fanelli, R., & Crosignani, P. (2012).
+Health effects for the population living near a cement plant: an epidemiological assessment. Environment international, 41, 1–7. https://doi.org/10.1016/j.envint.2011.12.005/
+
+
+\newpage
+# Technical Appendix A (R Script)  
+
+
+### R Script
+```{r showcode, ref.label=all_labels(), echo=TRUE, eval=FALSE}
+# Reprinted code chunks used previously for analysis
+```
+
+# Technical Appendix B (Assumptions and Results)
+
+## LM Model Assumptions (NY)
+```{r}
+par(mfrow = c(2, 2))
+plot(nylm)
+```
+
+## LM Model Summary (NY)
+```{r}
+summary(nylm)
+testny
+```
+
+## SAR Model Summary (NY)
+```{r}
+summary(nysar)
+```
+
+## CAR Model Summary (NY)
+```{r}
+summary(nycar)
+```
+
+
+
+
